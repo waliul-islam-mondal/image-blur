@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html>
+  <head>
+	<title>Image blurring tool</title>
+	<style>
+		lbtn{display:inline-block;text-align:center;font-style:italic;overflow:hidden;cursor:default;}
+		lbmd{display:inline-block;font-style:italic;overflow:auto;cursor:default;}
+	</style>
+
+	<script type="text/javascript">
+	
+	let cnv = null, ctx = null, cnv_backup = null;
+	let mstate = 0, mx = 0, my = 0;
+	let bkcolor = '';
+	
+	let objstrs = [], bkimg = null, bkimg_w = 0, bkimg_h = 0;
+	let laction = 'blur.rect', lobject = null, lptcnt = 0, tobject = null, lscale = 1.0;
+	let lsels = [];
+
+	function reset(){
+		mstate = mx = my = 0;
+		bkcolor = '';
+		laction = '';
+		cnv_backup = null;
+		objstrs = [];
+		bkimg = null;
+		bkimg_w = bkimg_h = 0;
+		document.getElementById('id_itemlist').innerHTML = '';
+		document.getElementById('id_copyregion').checked = false;
+		redraw_canvas();
+	}
+	
+	function hex2int(sh){
+		let v = 0;
+		for ( var i = 0; i < sh.length; i++ ){
+			let c = sh.charCodeAt(i);
+			if ( c >= 48 && c <= 57 )v = v * 16 + c - 48;
+			else if ( c >= 65 && c <= 70 )v = v * 16 + c - 55;
+			else if ( c >= 97 && c <= 102 )v = v * 16 + c - 87;
+		}
+		return parseInt(v);
+	}
+	
+	function int2hex(v, len){
+		v = parseInt(v);
+		let s = '';
+		for ( var i = 0; i < len; i++ ){
+			s = String.fromCharCode((v&15) + ((v&15) < 10 ? 48 : 87)) + s;
+			v = parseInt(v/16);
+		}
+		return s;
+	}	
+
+	function new_object(stype, sname){
+		stype = stype.trim().toLowerCase();
+		sname = ( sname == null ? stype : sname.trim());
+		sname += '.' + parseInt(objstrs.length+1);
+		if ( sname.indexOf(':') >= 0 )sname = sname.replaceAll(':', ',');
+		
+		let line_w  = parseFloat(document.getElementById('id_linewidth').value/8.0);
+		let draw_color = document.getElementById('id_bordercolor').value;
+		let draw_transp = document.getElementById('id_btransparency').value;
+		if ( draw_transp > 0 )draw_color += int2hex(255 - parseInt((draw_transp * 255)/100),2);
+		
+		let fill_color = '';
+		
+		if ( !document.getElementById('id_nofill').checked && 
+			(stype === 'rect' )){
+			fill_color = document.getElementById('id_fillcolor').value;;
+			let ftransp = document.getElementById('id_ftransparency').value;
+			if ( ftransp > 0 )fill_color += int2hex(255 - parseInt((ftransp * 255)/100),2);
+		}
+				
+		return {type:stype, name:sname, xy:[], foptions:[], border_width:line_w, color:draw_color, fill_color:fill_color};
+	}
+	
+	function struct_object(parms){
+		let stype = parms.type.trim().toLowerCase();
+		let s = stype + ':' + parms.sname + ':';
+		
+		for ( var i = 0; i < parms.xy.length; i++ )s += ( i > 0 ? ',' : '') + parseFloat(parms.xy[i]);		
+		s += ':';
+		for ( var i = 0; i < parms.foptions.length; i++ )s += ( i > 0 ? ',' : '') + parseFloat(parms.foptions[i]);
+		
+		s += ':' + parms.border_width + ':' + parms.color + ':' + parms.fill_color;
+		
+		return s;
+	}
+	
+	function parse_object(s){
+		let ss = s.split(':');
+		let stype = ss[0].trim().toLowerCase();
+		let sname = ss[1].trim();
+		
+		let xys = ss[2].split(','), fopts = ss[3].split(',');
+		for ( var i = 0; i < xys.length; i++ )xys[i] = parseFloat(xys[i]);
+		for ( var i = 0; i < fopts.length; i++ )fopts[i] = parseFloat(fopts[i]);
+		
+		return {type:stype, name:sname, xy:xys, foptions:fopts, border_width:ss[4], color:ss[5], fill_color:ss[6]};
+	}	
+
+	function draw_object(parms, is_highlight = 0){
+		let stype = parms.type;
+		let bx = parms.xy[0], by = parms.xy[1];	
+		
+		ctx.beginPath();
+		if ( parms.xy.length <= 2 ){
+			ctx.moveTo(bx - 4, by);			ctx.lineTo(bx + 4, by);
+			ctx.moveTo(bx, by - 4);			ctx.lineTo(bx, by + 4);
+		}else if ( stype === 'rect' ){
+			ctx.rect(bx, by, parms.xy[2] - bx, parms.xy[3] - by);
+		}else if ( stype === 'polygon' ){
+			ctx.moveTo(bx, by);
+			for ( var i = 2; i < parms.xy.length; i += 2 )ctx.lineTo(parms.xy[i], parms.xy[i+1]);
+			ctx.closePath();
+		}else return;
+		
+		if ( parms.fill_color.length > 0 && is_highlight != 3){
+			ctx.fillStyle = parms.fill_color;
+			ctx.fill();
+		}
+		
+		if ( is_highlight != 0 ){
+			ctx.lineWidth = 1;
+			if ( parms.border_width > ctx.lineWidth )ctx.lineWidth = parms.border_width;
+			
+			ctx.strokeStyle = 'red';
+			ctx.stroke();			
+		}else if ( parms.color.length > 0 ){
+			ctx.lineWidth = parms.border_width;
+			ctx.strokeStyle = parms.color;
+			ctx.stroke();
+		}		
+	}
+	
+	function reset_zoom(){
+		document.getElementById('id_zoomval').selectedIndex = 2;
+		set_zoom(100);		
+	}
+	
+	function set_zoom(zoom_percentage){
+		lscale = parseFloat(zoom_percentage/100.0);
+
+		if ( bkimg != null ){
+			document.getElementById('id_canvas').width = parseInt(bkimg_w * lscale);
+			document.getElementById('id_canvas').height = parseInt(bkimg_h * lscale);
+		}
+		
+		cnv = document.getElementById('id_canvas');	
+		ctx = cnv.getContext('2d');
+
+		ctx.resetTransform();
+		ctx.scale(lscale, lscale);
+		redraw_canvas();
+	}
+	
+	function redraw_canvas(){
+		cnv = document.getElementById('id_canvas');	
+		ctx = cnv.getContext('2d');		
+		ctx.lineWidth = 0.25;
+		ctx.clearRect(0, 0, cnv.width, cnv.height);		
+	
+		if ( bkimg != null )ctx.drawImage(bkimg,0,0);
+
+		ctx.beginPath();		
+		ctx.rect(0,0,cnv.width, cnv.height);
+		ctx.strokeStyle = 'gray';
+		ctx.stroke();
+		
+		for ( var i = 0; i < objstrs.length; i++ ){
+			if ( laction.startsWith('item.') && lsels.indexOf(i) >= 0 )continue;
+			draw_object(parse_object(objstrs[i]));
+		}
+				
+		cnv_backup = ctx.getImageData(0, 0, cnv.width, cnv.height);
+	}
+
+	function on_live_shape_completed(){		
+		if ( lobject != null && lobject.xy.length >= 4 && laction.startsWith('blur.')){			
+			add_new_object(lobject);
+		}
+		
+		lptcnt = 0;
+		lobject = null;
+		redraw_canvas();
+	}	
+	
+	function on_canvas_mouse_event(evt, is_down){
+		if ( is_down == 2 ){
+			if ( mstate == 1 && laction.startsWith('blur.') ){
+				let stype = laction.substr(5), pcnt = lobject.xy.length;				
+				if ( pcnt >= ( lptcnt * 2 ))on_live_shape_completed();
+			}
+			mstate = 0;
+			return;
+		}
+		
+		if ( evt.button != 0 )return;
+		if ( is_down == 0 && mstate != 1 )return;
+		
+		const cnv = document.getElementById('id_canvas');
+		const rect = cnv.getBoundingClientRect();
+		const x = parseInt(( evt.clientX - rect.left )/lscale), y = parseInt(( evt.clientY - rect.top )/lscale);
+		
+		if ( is_down == 1 ){
+			if ( laction.startsWith('blur.')){
+				if ( lobject != null && lobject.xy.length >= 2 ){
+					if ( lobject.xy.length < (lptcnt * 2)){
+						lobject.xy[lobject.xy.length] = x;
+						lobject.xy[lobject.xy.length] = y;						
+
+						ctx.putImageData(cnv_backup, 0, 0);
+						draw_object(lobject, 0);
+					}
+				}else{				
+					let stype = laction.substr(5);
+					lptcnt = 2;
+				
+					lobject = new_object(stype, stype);
+					lobject.xy[0] = x;
+					lobject.xy[1] = y;
+					draw_object(lobject);
+				}
+			}
+			
+			mstate = 1;
+			mx = x;
+			my = y;
+			return;
+		}
+
+		if ( is_down != 0 )return;
+		if ( laction.length <= 0 )return;
+		if ( Math.abs(x-mx) < 1 && Math.abs(y-my) < 1)return;
+			
+		if ( laction.startsWith('blur.')){
+			if ( lobject.xy.length == 2 && Math.abs(x-lobject.xy[0]) < 5 &&  Math.abs(y-lobject.xy[1]) < 5 )return;
+			if ( lobject.xy.length <= 2 ){
+				lobject.xy[lobject.xy.length] = x;
+				lobject.xy[lobject.xy.length] = y;
+			}else{
+				lobject.xy[lobject.xy.length-2] = x;
+				lobject.xy[lobject.xy.length-1] = y;
+			}		
+		
+			ctx.putImageData(cnv_backup, 0, 0);
+			draw_object(lobject, 0);
+			return;
+		}
+		
+		if ( !laction.startsWith('item.'))return;
+		
+		let scmd = laction.substr(5);
+		if ( scmd !== 'move' )return;
+		
+		ctx.putImageData(cnv_backup, 0, 0);				
+	
+		for ( var i = 0; i < lsels.length; i++ ){
+			lobject = parse_object(objstrs[lsels[i]]);
+				
+			if ( scmd === 'move' ){
+				for ( var j = 0; j < lobject.xy.length; j += 2 ){
+					lobject.xy[j] += ( x - mx );
+					lobject.xy[j+1] += ( y - my );
+				}
+			}				
+			objstrs[lsels[i]] = struct_object(lobject);
+			draw_object(lobject, 1);
+		}			
+						
+		mx = x;
+		my = y;
+	}
+
+	function read_file_from_pc(ev, read_callback_function){
+		if (!ev.target.files[0]){
+			console.log('event target empty !!!');
+			return 0;
+		}
+			
+		let fl = ev.target.files[0];
+		var reader = new FileReader();
+		reader.onload = function(event){
+			read_callback_function(fl.name, event.target.result);
+		}		
+		reader.readAsDataURL(fl);
+		return 1;
+	}	
+
+	function save_file_to_pc(dt, fname, ftype){
+		var file = new Blob([dt], {type: ftype});
+		if ( window.navigator.msSaveOrOpenBlob ){ // IE10+
+			window.navigator.msSaveOrOpenBlob(file, fname); 
+			return;
+		}
+		
+		var a = document.createElement("a"), url = URL.createObjectURL(file);
+		a.href = url;
+		a.download = fname;
+		document.body.appendChild(a);
+		a.click();
+		setTimeout(function(){document.body.removeChild(a);window.URL.revokeObjectURL(url);},0);
+	}
+
+	function add_new_object(obj){		
+		if ( obj.type === 'rect' ){
+			obj.type = 'polygon';
+			let x1 = obj.xy[0], y1 = obj.xy[1], x2 = obj.xy[2], y2 = obj.xy[3];
+			obj.xy[2] = x2;	obj.xy[3] = y1;
+			obj.xy[4] = x2; obj.xy[5] = y2;
+			obj.xy[6] = x1; obj.xy[7] = y2;
+		}
+		
+		objstrs[objstrs.length] = struct_object(obj);
+		let opt2 = document.createElement("option");
+		opt2.innerHTML = obj.name;
+		document.getElementById('id_itemlist').appendChild(opt2);
+	}
+	
+	function mnuclick(mnuname, prm){
+		mnuname = mnuname.trim().toLowerCase();
+		if ( mnuname === 'insert_image' ){
+			read_file_from_pc(prm, function(fname, fdata){				
+				bkimg = document.createElement("img");
+				bkimg.setAttribute("src", fdata);
+				
+				bkimg.onload = function(){
+					bkimg_w = bkimg.width;
+					bkimg_h = bkimg.height;
+					document.getElementById('id_canvas').width = bkimg_w;
+					document.getElementById('id_canvas').height = bkimg_h;
+					reset_zoom();
+				}
+			});
+			return;
+		}
+		
+		if ( mnuname === 'id_blurtype_done' && prm === 'cancel' ){
+			lobject = null;
+			redraw_canvas();
+		}else if ( mnuname === 'id_blurtype' || mnuname === 'id_blurtype_done')on_live_shape_completed();
+				
+		if ( mnuname !== 'id_blurtype' && mnuname !== 'id_itemlist' && mnuname !== 'item' )return;
+		
+		let prev_selected = ( lsels.length > 0 ? 1 : 0 ), redraw_request = 0;
+		
+		if ( mnuname === 'id_blurtype' || (mnuname === 'item' && (prm === 'done' || prm === 'cancel'))){
+			if ( lsels.length == 1 && (mnuname === 'id_blurtype' || prm === 'done' ))redraw_request = 1;
+			else if ( mnuname === 'item' )redraw_request = 1;
+			
+			document.getElementById('id_itemlist').selectedIndex = -1;
+		}else if ( mnuname === 'id_itemlist' || mnuname === 'item' ){
+			document.getElementById('id_blurtype').selectedIndex = -1;
+		}
+
+		if ( document.getElementById('id_blurtype').selectedIndex >= 0 ){
+			let s2 = document.getElementById('id_blurtype').value.trim().toLowerCase();
+			document.getElementById('id_blurtype_done').style.display = ( s2.startsWith('poly') ? 'inline-block' : 'none' );
+		}else document.getElementById('id_blurtype_done').style.display = 'none';
+		
+				
+		lsels = [];
+		let lst = document.getElementById('id_itemlist');	
+		document.getElementById('id_div_itemlist_menu').style.display = ( lst.selectedIndex < 0 ? 'none': 'inline-block' );
+
+		if ( lst.selectedIndex < 0 ){
+			if ( prev_selected == 1 )redraw_request = 1;
+		}else{
+			for ( var i = 0; i < lst.options.length; i++ )if ( lst.options[i].selected )lsels[lsels.length] = i;		
+			if ( lsels.length <= 0 )lsels[lsels.length] = lst.selectedIndex;
+		}		
+	
+		if ( mnuname === 'id_blurtype' || lsels.length <= 0 ){
+			if ( mnuname === 'id_blurtype' )laction = 'blur.' + document.getElementById('id_blurtype').value.trim().toLowerCase();
+			if ( redraw_request == 1 )redraw_canvas();
+			return;
+		}
+
+		laction = '';
+		
+		let mstr = ( mnuname === 'item' ? prm : '' );
+		if ( mnuname === 'id_itemlist' ){
+			mstr = 'move';
+			laction = 'item.move';
+			redraw_canvas();
+			for ( var i = 0; i < lsels.length; i++ )draw_object(parse_object(objstrs[lsels[i]]), 1);
+		}
+
+		if ( mstr === 'delete' ){
+			for ( var i = lsels.length-1; i >= 0; i-- ){
+				let p = lsels[i];
+				objstrs.splice(p,1);
+				document.getElementById('id_itemlist').remove(p);
+			}
+			
+			lsels = [];
+			document.getElementById('id_itemlist').selectedIndex = -1;
+			redraw_canvas();
+			return;
+		}
+	}	
+	</script>
+	
+  </head>
+
+  <body>	
+	<div style="display:inline-block;width:100%;height:100%;overflow:hidden;">
+		<div style="display:inline-block;width:20%;height:100%;overflow:auto-scroll;float:left;">
+			<div id="id_div_shape" style="width:95%;padding:2%;">				
+				<select id="id_blurtype" style="font-style:italic;width:100%;" size="7" onclick="mnuclick('id_blurtype','');">
+					<option selected="selected" value="rect">Blur rectangle</option>
+				<select/>
+				<br/>
+				<div id="id_blurtype_done" style="width:100%;display:none;">
+					<input type="button" style="width:70%;" onclick="mnuclick('id_blurtype_done', 'done');" value="Click here when done"/>&nbsp;&nbsp;
+					<input type="button" style="width:25%;" onclick="mnuclick('id_blurtype_done', 'cancel');" value="Cancel"/>
+				</div>
+				<br/>
+				
+				<lbmd>Line/border color</lbmd>&nbsp;<input type="color" id="id_bordercolor" style="width:40px;" value="#0000ff"/><br/>
+				<lbmd id='id_btrans_cur'>Transparency 0%</lbmd>
+				<input type="range" id="id_btransparency" style="width:40%;" min="0" max="100" value="0" onchange="document.getElementById('id_btrans_cur').innerHTML='Transparency ' + parseInt(this.value)+'%';"/><br/><br/>				
+				<lbmd id='id_linew_cur'>Line/border width 1px</lbmd>
+				<input type="range" id="id_linewidth" style="width:30%;" min="0" max="100" value="2" onchange="document.getElementById('id_linew_cur').innerHTML='Line/border width ' + parseFloat(this.value/2) + 'px';"/>
+				<br/><br/>
+				<input type="checkbox" id="id_nofill" onchange="document.getElementById('id_div_fill').style.display=(checked?'none':'inline-block');"/>&nbsp;<label for="id_nofill"><i>Do not fill</i></label><br/>
+				<div id="id_div_fill" style="width:100%;">					
+					<lbmd>Fill/background Color</lbmd>&nbsp;<input type="color" id="id_fillcolor" style="width:40px;" value="#c0c0c0"/><br/>
+					<lbmd id='id_ftrans_cur'>Transparency 20%</lbmd>
+					<input type="range" id="id_ftransparency" style="width:40%;" min="0" max="100" value="20" onchange="document.getElementById('id_ftrans_cur').innerHTML='Transparency '+parseFloat(this.value)+'%';"/>
+				</div>
+				<br/>
+				<select id="id_zoomval" style="font-style:italic;" onclick="set_zoom(value);">
+					<option value="25">0.25x</option>
+					<option value="50">0.5x</option>
+					<option value="100" selected="selected">No zoom</option>					
+					<option value="150">1.5x</option>
+					<option value="200">2x</option>
+					<option value="400">4x</option>
+				<select/>
+				
+				<br/><br/>
+				<input type="button" style="width:98%;" onclick="document.getElementById('id_image').click()" value="Set background image"/>
+				<input type="file" id="id_image" style="display:none" onchange="mnuclick('insert_image', event);">
+				<br/>				
+			</div>			
+		</div>
+		
+		<div id="id_div_canvas" style="display:inline-block;max-width:70%;max-height:100%;overflow:scroll;float:center;">
+			<canvas id="id_canvas" width="900px" height="600px" onmousemove="on_canvas_mouse_event(event,0);" onmousedown="on_canvas_mouse_event(event, 1);" onmouseup="on_canvas_mouse_event(event,2);"></canvas>
+		</div>
+
+		<div id="id_div_itemlist" style="display:inline-block;width:10%;height:100%;overflow:auto-scroll;float:right;">
+			<lbtn><u>Layers</u></lbtn><br/>
+			<select multiple id="id_itemlist" style="width:100%;font-style:italic;" onchange="mnuclick('id_itemlist', '');" size="20"></select><br/>
+			<div id="id_div_itemlist_menu" style="width:100%;font-style:italic;display:none;">				
+				<input type="button" style="width:40%;" onclick="mnuclick('item', 'delete');" value="Delete"/>
+				<br/><br/>				
+			</div>
+		</div>		
+	</div>
+	
+	<script type="text/javascript">
+		redraw_canvas();
+	</script>
+  </body>
+</html>
